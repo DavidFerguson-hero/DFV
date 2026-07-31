@@ -1,0 +1,40 @@
+/* Fonts are loaded via <link> in index.html, not @import here.
+   An @import inside a runtime-injected stylesheet is only discovered after
+   React mounts, which serialises: JS parse -> mount -> fetch font CSS ->
+   fetch font files. The <link> starts that work during initial HTML parse. */
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: #ffffff;
+  /* Fallbacks metric-close to Sora, so the swap shifts layout less. */
+  font-family: Sora, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+@keyframes dp {
+  0%, 100% { opacity: .22; transform: scale(.65); }
+  50%      { opacity: 1;   transform: scale(1.2); }
+}
+
+input:focus, textarea:focus {
+  border-color: #FE5716 !important;
+  outline: none;
+}
+
+button:hover { opacity: .82; }
+
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: #ffffff; }
+::-webkit-scrollbar-thumb { background: #eef0f5; border-radius: 3px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}

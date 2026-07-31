@@ -3,6 +3,18 @@ import Anthropic from "@anthropic-ai/sdk";
 const MODEL = "claude-sonnet-5";
 const MAX_TOKENS = 2000;
 
+// Built once per warm container, not per request, so the underlying HTTPS
+// connection pool is reused and repeat calls skip the TLS handshake.
+// The SDK default timeout is 10 minutes with 2 retries — worst case ~30
+// minutes of a user watching loading dots. 60s x 1 retry is plenty here.
+let client;
+function getClient(apiKey) {
+  if (!client) {
+    client = new Anthropic({ apiKey, timeout: 60_000, maxRetries: 1 });
+  }
+  return client;
+}
+
 // Reads the body as JSON. Vercel pre-parses it onto req.body; the Vite dev
 // middleware does not, so fall back to draining the stream.
 async function readJsonBody(req) {
@@ -46,14 +58,18 @@ export default async function handler(req, res) {
   }
 
   try {
-    const client = new Anthropic({ apiKey });
-    const message = await client.messages.create({
+    const message = await getClient(apiKey).messages.create({
       model: MODEL,
       max_tokens: MAX_TOKENS,
       // These agents return short JSON documents, so thinking is off to keep
       // the whole max_tokens budget available for the answer. To let the model
       // reason first, drop this line and raise MAX_TOKENS to ~8000.
       thinking: { type: "disabled" },
+      // Effort defaults to "high". These prompts are tightly specified and the
+      // output shape is fixed, so "high" buys little and costs latency on
+      // every one of the three parallel analysis calls. Raise to "high" if
+      // analysis quality drops.
+      output_config: { effort: "medium" },
       system,
       messages: [{ role: "user", content: user }],
     });

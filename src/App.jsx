@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 
 const C = {
   bg:"#ffffff", surface:"#f7f8fa", raised:"#eef0f5", border:"#dde1eb",
@@ -115,12 +115,26 @@ function extractJSON(raw) {
 
 // Calls the serverless proxy in /api/claude.js, which holds the API key.
 // The key is never present in this bundle.
+const REQUEST_TIMEOUT_MS = 90_000;
+
 async function callClaude(system, user) {
-  const res = await fetch("/api/claude", {
-    method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({ system, user }),
-  });
+  // Without this, a stalled request leaves the loading dots spinning forever.
+  const ac = new AbortController();
+  const timer = setTimeout(()=>ac.abort(), REQUEST_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch("/api/claude", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({ system, user }),
+      signal: ac.signal,
+    });
+  } catch (e) {
+    if (e.name === "AbortError") throw new Error("Request timed out — please try again.");
+    throw new Error("Network error — check your connection and try again.");
+  } finally {
+    clearTimeout(timer);
+  }
   const data = await res.json().catch(()=>null);
   if (!res.ok) throw new Error(data?.error?.message || `Request failed (${res.status})`);
   return extractJSON(data.text || "");
@@ -253,16 +267,30 @@ function SummaryPanel({results}) {
   </div>;
 }
 
+const PAD=48,W=600,H=400,PLOT_W=W-PAD*2,PLOT_H=H-PAD*2;
+const toX=s=>PAD+(s/10)*PLOT_W,toY=s=>PAD+PLOT_H-(s/10)*PLOT_H,toR=s=>12+(s/10)*22;
+
+function shortLabel(entry) {
+  const text=entry.summary||entry.idea||"";
+  return text.replace(/[^a-zA-Z ]/g," ").split(/\s+/).filter(Boolean).slice(0,3).join(" ");
+}
+
 function IdeaMatrix({library,onView}) {
   const [tooltip,setTooltip]=useState(null);
-  const PAD=48,W=600,H=400,PLOT_W=W-PAD*2,PLOT_H=H-PAD*2;
-  const plotItems=library.filter(e=>e.results?.desirability?.score!=null&&e.results?.feasibility?.score!=null&&e.results?.viability?.score!=null);
-  if (plotItems.length===0) return null;
-  function shortLabel(entry) {
-    const text=entry.summary||entry.idea||"";
-    return text.replace(/[^a-zA-Z ]/g," ").split(/\s+/).filter(Boolean).slice(0,3).join(" ");
-  }
-  const toX=s=>PAD+(s/10)*PLOT_W,toY=s=>PAD+PLOT_H-(s/10)*PLOT_H,toR=s=>12+(s/10)*22;
+  // Hovering a node sets state and re-renders the whole SVG. Without this memo
+  // every hover re-filtered the library and re-ran the label regex per entry.
+  const nodes=useMemo(()=>library
+    .filter(e=>e.results?.desirability?.score!=null&&e.results?.feasibility?.score!=null&&e.results?.viability?.score!=null)
+    .map(entry=>{
+      const des=entry.results.desirability.score,feas=entry.results.feasibility.score,via=entry.results.viability.score;
+      return {
+        entry, des, feas, via,
+        cx:toX(des), cy:toY(feas), r:toR(via),
+        words:shortLabel(entry).split(" "),
+        color:(des>=5&&feas>=5)?"#FE5716":(des<5&&feas>=5)?"#1089FF":(des>=5&&feas<5)?"#7a849e":"#e03030",
+      };
+    }),[library]);
+  if (nodes.length===0) return null;
   return <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:12,padding:"24px 24px 16px",marginBottom:28}}>
     <div style={{fontSize:13,fontWeight:700,color:C.text,marginBottom:4}}>Innovation Portfolio Matrix</div>
     <div style={{fontSize:12,color:C.muted,marginBottom:16}}>X axis: Desirability · Y axis: Feasibility · Circle size: Viability</div>
@@ -285,11 +313,8 @@ function IdeaMatrix({library,onView}) {
         </g>)}
         <text x={PAD+PLOT_W/2} y={H-4} textAnchor="middle" fontSize={11} fill={C.text} fontWeight="600" fontFamily="Sora,sans-serif">Desirability →</text>
         <text x={12} y={PAD+PLOT_H/2} textAnchor="middle" fontSize={11} fill={C.text} fontWeight="600" fontFamily="Sora,sans-serif" transform={`rotate(-90,12,${PAD+PLOT_H/2})`}>Feasibility →</text>
-        {plotItems.map((entry,i)=>{
-          const des=entry.results.desirability.score,feas=entry.results.feasibility.score,via=entry.results.viability.score;
-          const cx=toX(des),cy=toY(feas),r=toR(via),label=shortLabel(entry),words=label.split(" ");
+        {nodes.map(({entry,des,feas,via,cx,cy,r,words,color})=>{
           const isHovered=tooltip?.id===entry.id;
-          const color=(des>=5&&feas>=5)?"#FE5716":(des<5&&feas>=5)?"#1089FF":(des>=5&&feas<5)?"#7a849e":"#e03030";
           return <g key={entry.id} style={{cursor:"pointer"}} onClick={()=>onView(entry)} onMouseEnter={()=>setTooltip({id:entry.id,cx,cy,r,label:entry.summary||entry.idea,des,feas,via})} onMouseLeave={()=>setTooltip(null)}>
             <circle cx={cx} cy={cy} r={r} fill={color} fillOpacity={isHovered?0.9:0.18} stroke={color} strokeWidth={isHovered?2.5:1.5} style={{transition:"all 0.2s"}}/>
             {words.map((word,wi)=><text key={wi} x={cx} y={cy+(wi-(words.length-1)/2)*11} textAnchor="middle" dominantBaseline="middle" fontSize={9} fontWeight="600" fill={color} fontFamily="Sora,sans-serif" style={{pointerEvents:"none"}}>{word}</text>)}
@@ -314,13 +339,17 @@ function IdeaMatrix({library,onView}) {
   </div>;
 }
 
+// Intl formatters are expensive to construct; build once, not per card render.
+const shortDate=new Intl.DateTimeFormat("en-GB",{day:"numeric",month:"short",year:"numeric"});
+const longDate=new Intl.DateTimeFormat("en-GB",{weekday:"long",day:"numeric",month:"long",year:"numeric"});
+
 function LibraryCard({entry,onView}) {
   const avg=entry.results?Math.round(((entry.results.desirability?.score??0)+(entry.results.feasibility?.score??0)+(entry.results.viability?.score??0))/3):null;
   const verdict=avg>=8?{label:"Strong",color:C.des}:avg>=6?{label:"Promising",color:C.gold}:avg>=4?{label:"Needs work",color:C.via}:{label:"Reconsider",color:C.danger};
   return <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:"14px 18px",marginBottom:10,display:"flex",alignItems:"center",gap:14}}>
     <div style={{flex:1,minWidth:0}}>
       <div style={{fontSize:13,fontWeight:600,color:C.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{entry.summary||entry.idea?.slice(0,80)+"…"}</div>
-      <div style={{fontSize:11,color:C.muted,marginTop:3}}>{new Date(entry.savedAt).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"})}</div>
+      <div style={{fontSize:11,color:C.muted,marginTop:3}}>{shortDate.format(new Date(entry.savedAt))}</div>
     </div>
     {avg!==null&&<div style={{display:"flex",gap:8,alignItems:"center",flexShrink:0}}>
       <Chip label={verdict.label} color={verdict.color}/>
@@ -330,8 +359,18 @@ function LibraryCard({entry,onView}) {
   </div>;
 }
 
+// Hoisted to module scope: these are constant, so re-allocating them on every
+// App render only created garbage and broke referential equality for children.
+const btn={padding:"12px 26px",background:C.accent,color:C.bg,border:"none",borderRadius:8,fontSize:13,fontWeight:700,cursor:"pointer",letterSpacing:1,textTransform:"uppercase",fontFamily:"'IBM Plex Mono',monospace"};
+const btnG={padding:"10px 20px",background:"transparent",color:C.muted,border:`1px solid ${C.border}`,borderRadius:8,fontSize:13,cursor:"pointer",fontFamily:"'IBM Plex Mono',monospace"};
+const card={background:C.surface,border:`1px solid ${C.border}`,borderRadius:12,padding:28,marginBottom:24};
+const lbl={fontSize:10,color:C.muted,letterSpacing:2,textTransform:"uppercase",fontFamily:"'IBM Plex Mono',monospace",marginBottom:8,display:"block"};
+const inp={width:"100%",background:C.raised,border:`1px solid ${C.border}`,borderRadius:8,padding:"13px 16px",color:C.text,fontSize:14,outline:"none",boxSizing:"border-box",fontFamily:"Sora,sans-serif"};
+const ta={...inp,resize:"vertical",minHeight:110};
+
+const EDF_LOGO = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 80 32'%3E%3Crect width='80' height='32' rx='4' fill='%23FE5716'/%3E%3Ctext x='40' y='22' text-anchor='middle' font-family='Arial,sans-serif' font-weight='700' font-size='14' fill='white'%3EEDF%3C/text%3E%3C/svg%3E";
+
 export default function App() {
-  const [authed,setAuthed]=useState(false);
   const [nav,setNav]=useState("home");
   const [stage,setStage]=useState("idea");
   const [idea,setIdea]=useState("");
@@ -399,30 +438,7 @@ export default function App() {
     saveIdea(entry);
   };
 
-  const btn={padding:"12px 26px",background:C.accent,color:C.bg,border:"none",borderRadius:8,fontSize:13,fontWeight:700,cursor:"pointer",letterSpacing:1,textTransform:"uppercase",fontFamily:"'IBM Plex Mono',monospace"};
-  const btnG={padding:"10px 20px",background:"transparent",color:C.muted,border:`1px solid ${C.border}`,borderRadius:8,fontSize:13,cursor:"pointer",fontFamily:"'IBM Plex Mono',monospace"};
-  const card={background:C.surface,border:`1px solid ${C.border}`,borderRadius:12,padding:28,marginBottom:24};
-  const lbl={fontSize:10,color:C.muted,letterSpacing:2,textTransform:"uppercase",fontFamily:"'IBM Plex Mono',monospace",marginBottom:8,display:"block"};
-  const inp={width:"100%",background:C.raised,border:`1px solid ${C.border}`,borderRadius:8,padding:"13px 16px",color:C.text,fontSize:14,outline:"none",boxSizing:"border-box",fontFamily:"Sora,sans-serif"};
-  const ta={...inp,resize:"vertical",minHeight:110};
-
-  const EDF_LOGO = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 80 32'%3E%3Crect width='80' height='32' rx='4' fill='%23FE5716'/%3E%3Ctext x='40' y='22' text-anchor='middle' font-family='Arial,sans-serif' font-weight='700' font-size='14' fill='white'%3EEDF%3C/text%3E%3C/svg%3E";
-
-  useEffect(()=>{ setAuthed(true); },[]);
-
-  if (!authed) return <>
-    <style>{globalStyles}</style>
-    <div style={{minHeight:"100vh",background:C.bg,display:"flex",alignItems:"center",justifyContent:"center"}}>
-      <div style={{...card,maxWidth:440,width:"100%",margin:20,textAlign:"center"}}>
-        <img src={EDF_LOGO} alt="EDF" style={{height:36,width:"auto",marginBottom:16}}/>
-        <div style={{fontSize:22,fontWeight:700,color:C.text,marginBottom:8}}>Innovation Sense-Checker</div>
-        <div style={{fontSize:13,color:C.muted,marginTop:12}}>Loading…</div>
-      </div>
-    </div>
-  </>;
-
   return <>
-    <style>{globalStyles}</style>
     <div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:"Sora,sans-serif"}}>
       <nav style={{background:"#ffffff",borderBottom:`1px solid ${C.border}`,padding:"0 28px",display:"flex",alignItems:"center",height:54,boxShadow:"0 1px 4px rgba(0,0,0,0.06)"}}>
         <div style={{display:"flex",alignItems:"center",gap:10,marginRight:30,flexShrink:0}}>
@@ -532,7 +548,7 @@ export default function App() {
           <div style={{...card,marginBottom:20}}>
             <Chip label="Saved Analysis" color={C.gold}/>
             <div style={{fontSize:15,color:C.text,marginTop:10,lineHeight:1.6}}>{viewing.summary||viewing.idea}</div>
-            <div style={{fontSize:11,color:C.muted,marginTop:6}}>Saved {new Date(viewing.savedAt).toLocaleDateString("en-GB",{weekday:"long",day:"numeric",month:"long",year:"numeric"})}</div>
+            <div style={{fontSize:11,color:C.muted,marginTop:6}}>Saved {longDate.format(new Date(viewing.savedAt))}</div>
           </div>
           {["desirability","feasibility","viability"].map(k=><AgentCard key={k} agentKey={k} data={viewing.results?.[k]} loading={false}/>)}
           {viewing.results?.desirability&&viewing.results?.feasibility&&viewing.results?.viability&&<SummaryPanel results={viewing.results}/>}
@@ -542,15 +558,3 @@ export default function App() {
     </div>
   </>;
 }
-
-const globalStyles = `
-  @import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;700&display=swap');
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{background:#ffffff}
-  @keyframes dp{0%,100%{opacity:.22;transform:scale(.65)}50%{opacity:1;transform:scale(1.2)}}
-  input:focus,textarea:focus{border-color:#FE5716!important;outline:none}
-  button:hover{opacity:.82}
-  ::-webkit-scrollbar{width:5px}
-  ::-webkit-scrollbar-track{background:#ffffff}
-  ::-webkit-scrollbar-thumb{background:#eef0f5;border-radius:3px}
-`;
