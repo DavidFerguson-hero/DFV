@@ -163,18 +163,24 @@ function AgentCard({agentKey,data,loading}) {
   const cfg=AGENTS[agentKey];
   const [open,setOpen]=useState(false);
   const isD=agentKey==="desirability",isF=agentKey==="feasibility",isV=agentKey==="viability";
-  return <div style={{background:C.surface,borderRadius:10,marginBottom:12,border:`1px solid ${data?cfg.color+"55":C.border}`,overflow:"hidden",transition:"border-color 0.4s"}}>
-    <div onClick={()=>data&&setOpen(o=>!o)} style={{display:"flex",alignItems:"center",gap:14,padding:"18px 22px",cursor:data?"pointer":"default"}}>
-      <span style={{fontSize:20,color:cfg.color,flexShrink:0}}>{cfg.icon}</span>
-      <div style={{flex:1}}>
+  // A failed agent carries { error } and no score. It must never render a
+  // Ring, because "0/10" is indistinguishable from a real verdict.
+  const failed=!!data?.error;
+  const expandable=!!data&&!failed;
+  return <div style={{background:C.surface,borderRadius:10,marginBottom:12,border:`1px solid ${failed?C.danger+"55":data?cfg.color+"55":C.border}`,overflow:"hidden",transition:"border-color 0.4s"}}>
+    <div onClick={()=>expandable&&setOpen(o=>!o)} style={{display:"flex",alignItems:"center",gap:14,padding:"18px 22px",cursor:expandable?"pointer":"default"}}>
+      <span style={{fontSize:20,color:failed?C.danger:cfg.color,flexShrink:0}}>{cfg.icon}</span>
+      <div style={{flex:1,minWidth:0}}>
         <div style={{fontSize:10,color:C.muted,letterSpacing:2,textTransform:"uppercase",fontFamily:"'IBM Plex Mono',monospace"}}>Analysis Agent</div>
         <div style={{fontSize:17,fontWeight:700,color:C.text}}>{cfg.label}</div>
+        {failed&&<div style={{fontSize:12,color:C.danger,marginTop:4,lineHeight:1.5}}>{data.error}</div>}
       </div>
       {loading&&<Dots color={cfg.color}/>}
-      {data&&!loading&&<Ring score={data.score??0} color={cfg.color}/>}
-      {data&&<span style={{color:C.muted,fontSize:13}}>{open?"▲":"▼"}</span>}
+      {failed&&<Chip label="Not completed" color={C.danger}/>}
+      {data&&!loading&&!failed&&<Ring score={data.score??0} color={cfg.color}/>}
+      {expandable&&<span style={{color:C.muted,fontSize:13}}>{open?"▲":"▼"}</span>}
     </div>
-    {open&&data&&<div style={{padding:"0 22px 24px",borderTop:`1px solid ${C.border}`}}>
+    {open&&expandable&&<div style={{padding:"0 22px 24px",borderTop:`1px solid ${C.border}`}}>
       {isD&&data.persona&&<div style={{marginTop:18,padding:16,background:C.raised,borderRadius:8,borderLeft:`3px solid ${cfg.color}`}}>
         <Chip label="UK Customer Persona" color={cfg.color}/>
         <div style={{marginTop:10,fontSize:16,fontWeight:700,color:C.text}}>{data.persona.name}</div>
@@ -230,6 +236,9 @@ function AgentCard({agentKey,data,loading}) {
     </div>}
   </div>;
 }
+
+const AGENT_KEYS=["desirability","feasibility","viability"];
+const hasAllScores=r=>AGENT_KEYS.every(k=>typeof r?.[k]?.score==="number");
 
 function SummaryPanel({results}) {
   const avg=Math.round(((results.desirability?.score??0)+(results.feasibility?.score??0)+(results.viability?.score??0))/3);
@@ -420,6 +429,7 @@ export default function App() {
 
   const runAnalysis=async()=>{
     setStage("analysing");
+    setAllDone(false);setError("");setResults({});
     const ctx=`UK Energy Innovation Idea: ${idea}\n\nSummary: ${ideaSummary}\n\nClarifications:\n${questions.map((q,i)=>`Q: ${q}\nA: ${answers[i]||"(not answered)"}`).join("\n\n")}`;
     const final={};
     await Promise.all(["desirability","feasibility","viability"].map(async k=>{
@@ -428,12 +438,23 @@ export default function App() {
         const r=await callClaude(AGENTS[k].system,ctx);
         final[k]=r;setResults(p=>({...p,[k]:r}));
       } catch(e) {
-        const fb={score:0,assessment:"Analysis failed: "+e.message};
+        // Record the failure as a failure. Previously this stored a score of
+        // 0, which was then saved to the library and plotted on the matrix as
+        // though the idea had genuinely scored zero.
+        const fb={error:e.message};
         final[k]=fb;setResults(p=>({...p,[k]:fb}));
       }
       setAgentLoad(p=>({...p,[k]:false}));
     }));
     setAllDone(true);
+
+    const failed=["desirability","feasibility","viability"].filter(k=>final[k]?.error);
+    if (failed.length) {
+      // Don't persist a partial analysis — it would pollute the library and
+      // the portfolio matrix with an idea that was never fully assessed.
+      setError(`${failed.map(k=>AGENTS[k].label).join(" and ")} did not complete, so nothing was saved to your library. Retry to finish the analysis.`);
+      return;
+    }
     const entry={id:Date.now().toString(),idea,summary:ideaSummary,questions,answers,results:final,savedAt:new Date().toISOString()};
     saveIdea(entry);
   };
@@ -517,9 +538,15 @@ export default function App() {
               <div style={{fontSize:14,color:C.text,marginTop:10,lineHeight:1.6}}>{ideaSummary||idea}</div>
             </div>
             {["desirability","feasibility","viability"].map(k=><AgentCard key={k} agentKey={k} data={results[k]} loading={agentLoad[k]}/>)}
-            {allDone&&results.desirability&&results.feasibility&&results.viability&&<SummaryPanel results={results}/>}
+            {allDone&&error&&<div style={{...card,borderColor:C.danger+"55",background:C.danger+"11",marginTop:20,marginBottom:0}}>
+              <Chip label="Analysis incomplete" color={C.danger}/>
+              <div style={{fontSize:14,color:C.text,marginTop:10,lineHeight:1.7}}>{error}</div>
+            </div>}
+            {/* Only summarise when all three produced a real score. */}
+            {allDone&&!error&&hasAllScores(results)&&<SummaryPanel results={results}/>}
             {allDone&&<div style={{marginTop:24,display:"flex",gap:12,flexWrap:"wrap"}}>
-              <button style={btn} onClick={goNew}>+ Analyse Another Idea</button>
+              {error&&<button style={btn} onClick={runAnalysis}>↻ Retry Analysis</button>}
+              <button style={error?btnG:btn} onClick={goNew}>+ Analyse Another Idea</button>
               <button style={btnG} onClick={()=>{setNav("library");setViewing(null);}}>View Idea Library →</button>
             </div>}
           </>}
@@ -551,7 +578,7 @@ export default function App() {
             <div style={{fontSize:11,color:C.muted,marginTop:6}}>Saved {longDate.format(new Date(viewing.savedAt))}</div>
           </div>
           {["desirability","feasibility","viability"].map(k=><AgentCard key={k} agentKey={k} data={viewing.results?.[k]} loading={false}/>)}
-          {viewing.results?.desirability&&viewing.results?.feasibility&&viewing.results?.viability&&<SummaryPanel results={viewing.results}/>}
+          {hasAllScores(viewing.results)&&<SummaryPanel results={viewing.results}/>}
         </div>}
 
       </div>
