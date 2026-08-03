@@ -377,7 +377,11 @@ const lbl={fontSize:10,color:C.muted,letterSpacing:2,textTransform:"uppercase",f
 const inp={width:"100%",background:C.raised,border:`1px solid ${C.border}`,borderRadius:8,padding:"13px 16px",color:C.text,fontSize:14,outline:"none",boxSizing:"border-box",fontFamily:"Sora,sans-serif"};
 const ta={...inp,resize:"vertical",minHeight:110};
 
-const EDF_LOGO = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 80 32'%3E%3Crect width='80' height='32' rx='4' fill='%23FE5716'/%3E%3Ctext x='40' y='22' text-anchor='middle' font-family='Arial,sans-serif' font-weight='700' font-size='14' fill='white'%3EEDF%3C/text%3E%3C/svg%3E";
+// Served from public/, so Vite copies it to the build root untouched.
+// Intrinsic size is 376x160; width/height are set at each usage from that
+// ratio so the browser reserves space and the logo doesn't shift layout.
+const EDF_LOGO = "/edf-logo.png";
+const LOGO_RATIO = 376 / 160;
 
 export default function App() {
   const [nav,setNav]=useState("home");
@@ -463,7 +467,7 @@ export default function App() {
     <div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:"Sora,sans-serif"}}>
       <nav style={{background:"#ffffff",borderBottom:`1px solid ${C.border}`,padding:"0 28px",display:"flex",alignItems:"center",height:54,boxShadow:"0 1px 4px rgba(0,0,0,0.06)"}}>
         <div style={{display:"flex",alignItems:"center",gap:10,marginRight:30,flexShrink:0}}>
-          <img src={EDF_LOGO} alt="EDF" style={{height:26,width:"auto"}}/>
+          <img src={EDF_LOGO} alt="EDF" width={Math.round(26*LOGO_RATIO)} height={26} style={{height:26,width:"auto"}}/>
           <span style={{fontSize:13,fontWeight:600,color:"#0f1623",fontFamily:"Sora,sans-serif"}}>Innovation Sense-Checker</span>
         </div>
         {[["home","Home"],["new","+ New Idea"],["library","Idea Library"]].map(([k,l])=>(
@@ -477,7 +481,7 @@ export default function App() {
 
         {nav==="home"&&<div>
           <div style={{textAlign:"center",padding:"40px 0 48px"}}>
-            <img src={EDF_LOGO} alt="EDF" style={{height:48,width:"auto",marginBottom:20}}/>
+            <img src={EDF_LOGO} alt="EDF" width={Math.round(48*LOGO_RATIO)} height={48} style={{height:48,width:"auto",marginBottom:20}}/>
             <h1 style={{fontSize:34,fontWeight:700,color:C.text,letterSpacing:-0.5,marginBottom:12}}>Innovation Sense-Checker</h1>
             <p style={{fontSize:14,color:C.muted,maxWidth:520,margin:"0 auto 32px",lineHeight:1.8}}>Purpose-built for the UK energy industry. Submit an idea in power generation, distribution, retail or adjacent energy services and receive a structured DFV analysis grounded in UK regulation, culture, and £-denominated market data.</p>
             <button style={btn} onClick={goNew}>Submit an Idea →</button>
