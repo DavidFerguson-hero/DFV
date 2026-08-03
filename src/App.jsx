@@ -1,4 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
+import { CLARIFICATION, DESIRABILITY, FEASIBILITY, VIABILITY } from "./prompts";
+import { extractJSON } from "./lib/extractJSON";
 
 const C = {
   bg:"#ffffff", surface:"#f7f8fa", raised:"#eef0f5", border:"#dde1eb",
@@ -6,133 +8,14 @@ const C = {
   des:"#FE5716", feas:"#1089FF", via:"#0d6ecc", danger:"#e03030",
 };
 
+// System prompts live in src/prompts.js (single source of truth, reusable by a
+// headless runner). This object just pairs each with its UI label/colour/icon.
 const AGENTS = {
-  clarification: {
-    label:"Clarification", color:C.accent, icon:"◎",
-    system:`You are an innovation consultant specialising in the UK energy sector. Your scope is strictly ideas related to power generation, distribution, retail, flexibility, or closely adjacent energy services in the UK.
-
-Ask exactly 4 targeted clarifying questions covering: (1) primary customer or end-user segment within UK energy, (2) the specific problem or friction being solved, (3) proposed solution mechanism, (4) current stage of development.
-
-Return ONLY valid JSON, no preamble:
-{ "questions": ["q1","q2","q3","q4"], "summary": "one sentence restatement", "inScope": true }
-
-If the idea is clearly outside UK energy, set inScope to false and add "scopeNote": "brief explanation".`,
-  },
-  desirability: {
-    label:"Desirability", color:C.des, icon:"◈",
-    system:`You are a Desirability Analyst specialising in the UK energy market using human-centred design principles.
-
-Create a realistic UK-based persona relevant to the idea and assess desirability through their eyes.
-
-UK personas must reflect authentic UK demographics, British culture, UK attitudes to energy bills, net zero awareness, smart meter rollout, Ofgem price cap context, and real UK energy market dynamics.
-
-Return ONLY valid JSON. Keep all string values concise (2 sentences max per field):
-{
-  "persona": {
-    "name": "string (British name)",
-    "role": "string (e.g. Facilities Manager at an NHS Trust in Leeds)",
-    "profile": "1-2 sentences of vivid UK context",
-    "pains": ["pain 1", "pain 2", "pain 3"],
-    "gains": ["gain 1", "gain 2", "gain 3"]
-  },
-  "assessment": "2 short paragraphs evaluating the idea from this persona perspective",
-  "score": 7,
-  "scoreRationale": "one sentence",
-  "opportunities": ["opp 1", "opp 2", "opp 3"],
-  "risks": ["risk 1", "risk 2", "risk 3"]
-}`,
-  },
-  feasibility: {
-    label:"Feasibility", color:C.feas, icon:"◉",
-    system:`You are a Feasibility Analyst with deep expertise in UK energy technology, engineering, and regulation.
-
-Assess feasibility drawing on UK-specific context: Ofgem, DESNZ, NESO, DNOs, BSC/EMR frameworks, GB transmission and distribution, Balancing Mechanism, CfD, REGO, REMA, IETF, LNRS.
-
-Return ONLY valid JSON. Keep all string values concise (2 sentences max):
-{
-  "trlLevel": 4,
-  "trlDescription": "one sentence describing TRL in this context",
-  "assessment": "2 short paragraphs on feasibility",
-  "score": 6,
-  "scoreRationale": "one sentence",
-  "keyTechnologies": ["tech 1", "tech 2", "tech 3"],
-  "regulatoryConsiderations": ["UK reg 1 citing body/framework", "UK reg 2", "UK reg 3"],
-  "effortEstimate": "e.g. 12-24 months to MVP",
-  "risks": ["risk 1", "risk 2", "risk 3"]
-}`,
-  },
-  viability: {
-    label:"Viability", color:C.via, icon:"◑",
-    system:`You are a Viability Analyst specialising in the UK energy sector commercial landscape.
-
-All market size figures MUST be in GBP (£). Reference UK-specific market data. Identify real UK-based or UK-active competitors. Consider Ofgem price controls, network charging, TNUOS/DUoS, PPA structures, Supplier Obligation, and UK energy retail/wholesale dynamics.
-
-Return ONLY valid JSON. Keep all string values concise (2 sentences max):
-{
-  "marketSize": "£X bn TAM with one line of UK-specific reasoning",
-  "assessment": "2 short paragraphs on commercial viability in UK energy",
-  "score": 7,
-  "scoreRationale": "one sentence",
-  "competitors": [
-    { "name": "string", "description": "one sentence UK context" },
-    { "name": "string", "description": "one sentence UK context" },
-    { "name": "string", "description": "one sentence UK context" }
-  ],
-  "differentiators": ["diff 1", "diff 2", "diff 3"],
-  "risks": ["risk 1", "risk 2", "risk 3"],
-  "revenueModels": ["model 1", "model 2"]
-}`,
-  },
+  clarification: { label:"Clarification", color:C.accent, icon:"◎", system:CLARIFICATION },
+  desirability:  { label:"Desirability",  color:C.des,    icon:"◈", system:DESIRABILITY  },
+  feasibility:   { label:"Feasibility",   color:C.feas,   icon:"◉", system:FEASIBILITY   },
+  viability:     { label:"Viability",     color:C.via,    icon:"◑", system:VIABILITY     },
 };
-
-// The prompts ask for "2 short paragraphs", which the model often delivers as
-// a real line break inside a JSON string. That is invalid JSON and used to
-// fail the whole analysis. Valid JSON never contains raw control characters
-// inside a string, so escaping them is safe to apply unconditionally.
-function escapeControlCharsInStrings(s) {
-  let out="",inStr=false,esc=false;
-  for (const ch of s) {
-    if (esc) { out+=ch; esc=false; continue; }
-    if (ch==="\\") { out+=ch; esc=true; continue; }
-    if (ch==='"') { inStr=!inStr; out+=ch; continue; }
-    if (inStr) {
-      if (ch==="\n") { out+="\\n"; continue; }
-      if (ch==="\r") { out+="\\r"; continue; }
-      if (ch==="\t") { out+="\\t"; continue; }
-    }
-    out+=ch;
-  }
-  return out;
-}
-
-function extractJSON(raw) {
-  let text = raw.replace(/```json\s*/gi,"").replace(/```\s*/g,"").trim();
-  text = escapeControlCharsInStrings(text);
-  try { return JSON.parse(text); } catch(_) {}
-  const start = text.indexOf("{");
-  if (start===-1) throw new Error("No JSON found in response");
-  let depth=0,end=-1;
-  for (let i=start;i<text.length;i++) {
-    if (text[i]==="{") depth++;
-    else if (text[i]==="}") { depth--; if (depth===0) { end=i; break; } }
-  }
-  if (end!==-1) { try { return JSON.parse(text.slice(start,end+1)); } catch(_) {} }
-  let frag=(end!==-1?text.slice(start,end+1):text.slice(start)).replace(/,\s*$/,"");
-  let braces=0,brackets=0,inStr=false,esc=false;
-  for (const ch of frag) {
-    if (esc) { esc=false; continue; }
-    if (ch==="\\"&&inStr) { esc=true; continue; }
-    if (ch==='"') { inStr=!inStr; continue; }
-    if (inStr) continue;
-    if (ch==="{") braces++; else if (ch==="}") braces--;
-    else if (ch==="[") brackets++; else if (ch==="]") brackets--;
-  }
-  if (inStr) frag+='"';
-  frag+="]".repeat(Math.max(0,brackets))+"}".repeat(Math.max(0,braces));
-  try { return JSON.parse(frag); } catch {
-    throw new Error("Could not parse agent response — please try again.");
-  }
-}
 
 // Calls the serverless proxy in /api/claude.js, which holds the API key.
 // The key is never present in this bundle.
@@ -224,10 +107,6 @@ function AgentCard({agentKey,data,loading}) {
         </div>
         <div style={{fontSize:13,color:C.muted,lineHeight:1.7}}>{data.trlDescription}</div>
       </div>}
-      {isV&&data.marketSize&&<div style={{marginTop:18,padding:"12px 16px",background:C.raised,borderRadius:8,borderLeft:`3px solid ${cfg.color}`}}>
-        <div style={{fontSize:10,color:cfg.color,letterSpacing:2,textTransform:"uppercase",fontFamily:"'IBM Plex Mono',monospace",marginBottom:4}}>UK Market Size (£)</div>
-        <div style={{fontSize:14,color:C.text,lineHeight:1.6}}>{data.marketSize}</div>
-      </div>}
       <div style={{marginTop:16,fontSize:13,color:C.muted,lineHeight:1.8}}>{data.assessment}</div>
       <div style={{marginTop:12,padding:"8px 14px",background:cfg.color+"11",borderRadius:6,fontSize:13,color:cfg.color,fontStyle:"italic"}}>Score rationale: {data.scoreRationale}</div>
       <div style={{marginTop:18,display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
@@ -247,13 +126,6 @@ function AgentCard({agentKey,data,loading}) {
       {isF&&data.effortEstimate&&<div style={{marginTop:14,display:"inline-flex",gap:8,alignItems:"center",padding:"8px 14px",background:C.bg,borderRadius:6}}>
         <span style={{color:cfg.color}}>⏱</span>
         <span style={{fontSize:13,color:C.text}}>Effort to MVP: <strong>{data.effortEstimate}</strong></span>
-      </div>}
-      {isV&&(data.competitors||[]).length>0&&<div style={{marginTop:16}}>
-        <div style={{fontSize:10,color:C.gold,letterSpacing:1.5,textTransform:"uppercase",fontFamily:"'IBM Plex Mono',monospace",marginBottom:8}}>UK-Active Competitors</div>
-        {data.competitors.map((comp,i)=><div key={i} style={{padding:"8px 12px",background:C.bg,borderRadius:6,marginBottom:6}}>
-          <span style={{fontWeight:600,color:C.text}}>{comp.name}</span>
-          <span style={{color:C.muted,fontSize:12}}> — {comp.description}</span>
-        </div>)}
       </div>}
       {isV&&(data.revenueModels||[]).length>0&&<div style={{marginTop:14}}>
         <div style={{fontSize:10,color:C.gold,letterSpacing:1.5,textTransform:"uppercase",fontFamily:"'IBM Plex Mono',monospace",marginBottom:8}}>Revenue Models</div>
@@ -425,6 +297,7 @@ export default function App() {
   const [error,setError]=useState("");
   const [library,setLibrary]=useState([]);
   const [viewing,setViewing]=useState(null);
+  const [ledgerNote,setLedgerNote]=useState("");
 
   useEffect(()=>{
     if (nav==="library") {
@@ -442,8 +315,26 @@ export default function App() {
     } catch(_) {}
   };
 
-  const reset=()=>{ setStage("idea");setIdea("");setQuestions([]);setIdeaSummary("");setAnswers({});setResults({});setAllDone(false);setError("");setInScope(true);setScopeNote("");setViewing(null); };
+  const reset=()=>{ setStage("idea");setIdea("");setQuestions([]);setIdeaSummary("");setAnswers({});setResults({});setAllDone(false);setError("");setInScope(true);setScopeNote("");setViewing(null);setLedgerNote(""); };
   const goNew=()=>{ reset();setNav("new"); };
+
+  // DFV is R-Spike's intake screen: a fully-scored idea is pushed to the ledger
+  // inbox (api/ledger.js appends it as JSONL; an R-Spike importer loads it into
+  // the SQLite ledger). Non-blocking — if the inbox is unreachable (e.g. the dev
+  // server isn't running), the local library save still stands.
+  const sendToLedger=async(entry)=>{
+    try {
+      const res=await fetch("/api/ledger",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({ idea:{ idea:entry.idea, summary:entry.summary, results:entry.results } }),
+      });
+      if (!res.ok) { const d=await res.json().catch(()=>null); throw new Error(d?.error?.message||`Request failed (${res.status})`); }
+      setLedgerNote("✓ Added to the R-Spike ledger inbox.");
+    } catch(e) {
+      setLedgerNote(`Saved locally, but couldn't reach the ledger inbox (${e.message}). It'll need re-sending, or check the dev server is running.`);
+    }
+  };
 
   const submitIdea=async()=>{
     if (!idea.trim()) return;
@@ -487,6 +378,7 @@ export default function App() {
     }
     const entry={id:Date.now().toString(),idea,summary:ideaSummary,questions,answers,results:final,savedAt:new Date().toISOString()};
     saveIdea(entry);
+    sendToLedger(entry);
   };
 
   return <>
@@ -516,7 +408,7 @@ export default function App() {
             {[
               {color:C.des,icon:"◈",title:"Desirability",desc:"UK customer persona analysis grounded in British energy demographics, Ofgem price cap context, and net zero attitudes."},
               {color:C.feas,icon:"◉",title:"Feasibility",desc:"Technical readiness assessed against UK grid infrastructure, Ofgem/DESNZ frameworks, and real UK programme funding."},
-              {color:C.via,icon:"◑",title:"Viability",desc:"Market sizing in £ with UK-active competitor mapping, commercial model assessment, and energy sector revenue models."},
+              {color:C.via,icon:"◑",title:"Viability",desc:"A quick commercial-viability read: defensibility, revenue models, and key risks. Detailed £ market sizing is handled by a separate analysis."},
             ].map(a=><div key={a.title} style={{background:C.surface,border:`1px solid ${a.color}33`,borderRadius:10,padding:20}}>
               <div style={{fontSize:22,color:a.color,marginBottom:8}}>{a.icon}</div>
               <div style={{fontSize:15,fontWeight:700,color:C.text,marginBottom:6}}>{a.title}</div>
@@ -574,6 +466,7 @@ export default function App() {
             </div>}
             {/* Only summarise when all three produced a real score. */}
             {allDone&&!error&&hasAllScores(results)&&<SummaryPanel results={results}/>}
+            {allDone&&!error&&ledgerNote&&<div style={{marginTop:16,fontSize:12,color:C.muted,fontFamily:"'IBM Plex Mono',monospace"}}>{ledgerNote}</div>}
             {allDone&&<div style={{marginTop:24,display:"flex",gap:12,flexWrap:"wrap"}}>
               {error&&<button style={btn} onClick={runAnalysis}>↻ Retry Analysis</button>}
               <button style={error?btnG:btn} onClick={goNew}>+ Analyse Another Idea</button>
