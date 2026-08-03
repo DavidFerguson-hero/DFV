@@ -85,8 +85,29 @@ Return ONLY valid JSON. Keep all string values concise (2 sentences max):
   },
 };
 
+// The prompts ask for "2 short paragraphs", which the model often delivers as
+// a real line break inside a JSON string. That is invalid JSON and used to
+// fail the whole analysis. Valid JSON never contains raw control characters
+// inside a string, so escaping them is safe to apply unconditionally.
+function escapeControlCharsInStrings(s) {
+  let out="",inStr=false,esc=false;
+  for (const ch of s) {
+    if (esc) { out+=ch; esc=false; continue; }
+    if (ch==="\\") { out+=ch; esc=true; continue; }
+    if (ch==='"') { inStr=!inStr; out+=ch; continue; }
+    if (inStr) {
+      if (ch==="\n") { out+="\\n"; continue; }
+      if (ch==="\r") { out+="\\r"; continue; }
+      if (ch==="\t") { out+="\\t"; continue; }
+    }
+    out+=ch;
+  }
+  return out;
+}
+
 function extractJSON(raw) {
   let text = raw.replace(/```json\s*/gi,"").replace(/```\s*/g,"").trim();
+  text = escapeControlCharsInStrings(text);
   try { return JSON.parse(text); } catch(_) {}
   const start = text.indexOf("{");
   if (start===-1) throw new Error("No JSON found in response");
@@ -137,6 +158,11 @@ async function callClaude(system, user) {
   }
   const data = await res.json().catch(()=>null);
   if (!res.ok) throw new Error(data?.error?.message || `Request failed (${res.status})`);
+  // Distinguish a genuinely truncated answer from a malformed one, so the
+  // error points at the real cause instead of blaming the parser.
+  if (data?.stop_reason === "max_tokens") {
+    throw new Error("The response was cut short before it finished — please try again.");
+  }
   return extractJSON(data.text || "");
 }
 
