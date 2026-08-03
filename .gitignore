@@ -2,6 +2,9 @@ node_modules
 dist
 .vercel
 
+# Local R-Spike ledger inbox (screened ideas awaiting import)
+data/
+
 # Secrets — never commit
 .env
 .env.*
