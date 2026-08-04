@@ -8,7 +8,12 @@ function apiDevServer(env) {
   const mount = (server, route, modulePath, envKeys = []) =>
     server.middlewares.use(route, async (req, res) => {
       try {
-        for (const key of envKeys) process.env[key] ||= env[key];
+        // Only copy a var if it's actually defined. Using ||= with an undefined
+        // source would set process.env[key] to the STRING "undefined", which
+        // then silently poisons paths/ids downstream.
+        for (const key of envKeys) {
+          if (env[key] !== undefined && process.env[key] === undefined) process.env[key] = env[key];
+        }
         const mod = await server.ssrLoadModule(modulePath);
         await mod.default(req, res);
       } catch (err) {
