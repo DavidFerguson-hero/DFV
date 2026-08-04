@@ -69,9 +69,12 @@ function send(res, status, payload) {
 function toLedgerIdea(idea) {
   const r = idea?.results || {};
   const num = (v) => (typeof v === "number" ? v : null);
+  // Prefer the agent's short (<=3 word) name; cap defensively to 3 words.
+  const threeWords = (s) => String(s).trim().split(/\s+/).slice(0, 3).join(" ");
   const title =
-    (idea?.summary && String(idea.summary).trim()) ||
-    (idea?.idea ? String(idea.idea).slice(0, 80) : "Untitled idea");
+    (idea?.title && threeWords(idea.title)) ||
+    (idea?.summary && threeWords(idea.summary)) ||
+    (idea?.idea ? threeWords(idea.idea) : "Untitled idea");
   return {
     title,
     description: idea?.idea || "",

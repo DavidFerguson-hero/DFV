@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { CLARIFICATION, DESIRABILITY, FEASIBILITY, VIABILITY } from "./prompts";
 import { extractJSON } from "./lib/extractJSON";
+import { bucket, bucketLabel, tco as calcTCO, weightedDVF, tier } from "./scoring";
 
 const C = {
   bg:"#ffffff", surface:"#f7f8fa", raised:"#eef0f5", border:"#dde1eb",
@@ -60,11 +61,12 @@ function Dots({color}) {
 }
 
 function Ring({score,color,size=76}) {
-  const r=(size-10)/2,circ=2*Math.PI*r,fill=Math.min(Math.max(score,0)/10,1)*circ;
+  // Scores are on the 1-3-9 (Low/Med/High) scale; fill proportional to /9.
+  const b=bucket(score),r=(size-10)/2,circ=2*Math.PI*r,fill=Math.min(Math.max(b??0,0)/9,1)*circ;
   return <svg width={size} height={size} style={{transform:"rotate(-90deg)",flexShrink:0}}>
     <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={C.border} strokeWidth={5}/>
     <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth={5} strokeDasharray={`${fill} ${circ-fill}`} strokeLinecap="round" style={{transition:"stroke-dasharray 1.2s cubic-bezier(.4,0,.2,1)"}}/>
-    <text x={size/2} y={size/2} textAnchor="middle" dominantBaseline="middle" fill={color} fontSize={size*0.21} fontWeight="700" style={{transform:`rotate(90deg)`,transformOrigin:`${size/2}px ${size/2}px`,fontFamily:"'IBM Plex Mono',monospace"}}>{score}/10</text>
+    <text x={size/2} y={size/2} textAnchor="middle" dominantBaseline="middle" fill={color} fontSize={size*0.19} fontWeight="700" style={{transform:`rotate(90deg)`,transformOrigin:`${size/2}px ${size/2}px`,fontFamily:"'IBM Plex Mono',monospace"}}>{bucketLabel(b)}</text>
   </svg>;
 }
 
@@ -139,8 +141,11 @@ const AGENT_KEYS=["desirability","feasibility","viability"];
 const hasAllScores=r=>AGENT_KEYS.every(k=>typeof r?.[k]?.score==="number");
 
 function SummaryPanel({results}) {
-  const avg=Math.round(((results.desirability?.score??0)+(results.feasibility?.score??0)+(results.viability?.score??0))/3);
-  const verdict=avg>=8?{label:"STRONG SIGNAL",color:C.des}:avg>=6?{label:"PROMISING",color:C.gold}:avg>=4?{label:"NEEDS WORK",color:C.via}:{label:"RECONSIDER",color:C.danger};
+  const d=results.desirability?.score, f=results.feasibility?.score, v=results.viability?.score;
+  const wdvf=weightedDVF(d,v,f);
+  const tcoVal=calcTCO(v,f);
+  const verdict=tier(wdvf);
+  const wdvfStr=wdvf==null?"—":wdvf.toFixed(2);
   const steps=[
     results.desirability?.score<7&&"Run 6–8 customer discovery interviews with UK energy users matching the persona — focus on validating the unmet need.",
     results.feasibility?.score<7&&"Commission a technical spike with a UK-based energy engineer or academic to address the key feasibility blockers identified.",
@@ -151,16 +156,16 @@ function SummaryPanel({results}) {
   ].filter(Boolean).slice(0,3);
   return <div style={{background:C.surface,border:`1px solid ${verdict.color}55`,borderRadius:10,padding:26,marginTop:20}}>
     <div style={{display:"flex",alignItems:"center",gap:16,marginBottom:22}}>
-      <div style={{width:60,height:60,borderRadius:"50%",background:verdict.color+"22",border:`2px solid ${verdict.color}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,fontWeight:700,color:verdict.color,fontFamily:"'IBM Plex Mono',monospace"}}>{avg}</div>
+      <div style={{width:64,height:64,borderRadius:14,background:verdict.color+"22",border:`2px solid ${verdict.color}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,fontWeight:700,color:verdict.color,fontFamily:"'IBM Plex Mono',monospace"}}>{wdvfStr}</div>
       <div>
-        <div style={{fontSize:10,color:C.muted,letterSpacing:2,textTransform:"uppercase",fontFamily:"'IBM Plex Mono',monospace"}}>Overall Verdict</div>
+        <div style={{fontSize:10,color:C.muted,letterSpacing:2,textTransform:"uppercase",fontFamily:"'IBM Plex Mono',monospace"}}>Weighted DVF · TCO {tcoVal??"—"}</div>
         <div style={{fontSize:22,fontWeight:700,color:verdict.color}}>{verdict.label}</div>
       </div>
     </div>
     <div style={{display:"flex",gap:10,marginBottom:22,flexWrap:"wrap"}}>
       {[{k:"desirability",label:"Desirability",color:C.des},{k:"feasibility",label:"Feasibility",color:C.feas},{k:"viability",label:"Viability",color:C.via}].map(a=>(
         <div key={a.k} style={{flex:1,minWidth:100,padding:"12px 14px",background:C.raised,borderRadius:8,textAlign:"center",border:`1px solid ${a.color}33`}}>
-          <div style={{fontSize:22,fontWeight:700,color:a.color,fontFamily:"'IBM Plex Mono',monospace"}}>{results[a.k]?.score??"-"}</div>
+          <div style={{fontSize:20,fontWeight:700,color:a.color,fontFamily:"'IBM Plex Mono',monospace"}}>{bucketLabel(bucket(results[a.k]?.score))}</div>
           <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginTop:2}}>{a.label}</div>
           <div style={{fontSize:11,color:C.muted,marginTop:4,lineHeight:1.4}}>{results[a.k]?.scoreRationale}</div>
         </div>
@@ -175,7 +180,9 @@ function SummaryPanel({results}) {
 }
 
 const PAD=48,W=600,H=400,PLOT_W=W-PAD*2,PLOT_H=H-PAD*2;
-const toX=s=>PAD+(s/10)*PLOT_W,toY=s=>PAD+PLOT_H-(s/10)*PLOT_H,toR=s=>12+(s/10)*22;
+// Weighted DVF matrix axes: X = Total Cost of Ownership (0-18), Y = Desirability (0-9).
+const XMAX=18,YMAX=9,XMID=8,YMID=6;
+const toX=t=>PAD+(t/XMAX)*PLOT_W,toY=d=>PAD+PLOT_H-(d/YMAX)*PLOT_H;
 
 function shortLabel(entry) {
   const text=entry.summary||entry.idea||"";
@@ -184,59 +191,59 @@ function shortLabel(entry) {
 
 function IdeaMatrix({library,onView}) {
   const [tooltip,setTooltip]=useState(null);
-  // Hovering a node sets state and re-renders the whole SVG. Without this memo
-  // every hover re-filtered the library and re-ran the label regex per entry.
+  // Weighted DVF prioritisation: X = Total Cost of Ownership, Y = Desirability.
+  // Best ideas sit top-left (high value, low cost).
   const nodes=useMemo(()=>library
     .filter(e=>e.results?.desirability?.score!=null&&e.results?.feasibility?.score!=null&&e.results?.viability?.score!=null)
     .map(entry=>{
       const des=entry.results.desirability.score,feas=entry.results.feasibility.score,via=entry.results.viability.score;
+      const tcoV=calcTCO(via,feas),wd=weightedDVF(des,via,feas),bd=bucket(des);
+      const jit=((entry.id?.split("").reduce((a,c)=>a+c.charCodeAt(0),0)||0)%100)/100-0.5;
       return {
-        entry, des, feas, via,
-        cx:toX(des), cy:toY(feas), r:toR(via),
+        entry, des, feas, via, tcoV, wd,
+        cx:toX(tcoV)+jit*16, cy:toY(bd)+jit*16,
         words:shortLabel(entry).split(" "),
-        color:(des>=5&&feas>=5)?"#FE5716":(des<5&&feas>=5)?"#1089FF":(des>=5&&feas<5)?"#7a849e":"#e03030",
+        color:tier(wd).color,
       };
     }),[library]);
   if (nodes.length===0) return null;
+  const q=(x,y,w,h,fill)=><rect x={x} y={y} width={w} height={h} fill={fill}/>;
   return <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:12,padding:"24px 24px 16px",marginBottom:28}}>
-    <div style={{fontSize:13,fontWeight:700,color:C.text,marginBottom:4}}>Innovation Portfolio Matrix</div>
-    <div style={{fontSize:12,color:C.muted,marginBottom:16}}>X axis: Desirability · Y axis: Feasibility · Circle size: Viability</div>
+    <div style={{fontSize:13,fontWeight:700,color:C.text,marginBottom:4}}>Prioritisation Matrix — Weighted DVF</div>
+    <div style={{fontSize:12,color:C.muted,marginBottom:16}}>X: Total Cost of Ownership (lower is better) · Y: Desirability · top-left wins</div>
     <div style={{overflowX:"auto"}}>
       <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} style={{display:"block",maxWidth:"100%"}}>
-        <rect x={PAD} y={PAD} width={PLOT_W/2} height={PLOT_H/2} fill="#1089FF08"/>
-        <rect x={PAD+PLOT_W/2} y={PAD} width={PLOT_W/2} height={PLOT_H/2} fill="#FE571608"/>
-        <rect x={PAD} y={PAD+PLOT_H/2} width={PLOT_W/2} height={PLOT_H/2} fill="#e0303008"/>
-        <rect x={PAD+PLOT_W/2} y={PAD+PLOT_H/2} width={PLOT_W/2} height={PLOT_H/2} fill="#7a849e08"/>
-        <text x={PAD+8} y={PAD+16} fontSize={9} fill="#1089FF" opacity={0.7} fontFamily="IBM Plex Mono,monospace">HIGH FEASIBILITY / LOW DESIRABILITY</text>
-        <text x={PAD+PLOT_W/2+8} y={PAD+16} fontSize={9} fill="#FE5716" opacity={0.8} fontFamily="IBM Plex Mono,monospace" fontWeight="700">★ SWEET SPOT</text>
-        <text x={PAD+8} y={PAD+PLOT_H/2+16} fontSize={9} fill="#e03030" opacity={0.6} fontFamily="IBM Plex Mono,monospace">LOW FEASIBILITY / LOW DESIRABILITY</text>
-        <text x={PAD+PLOT_W/2+8} y={PAD+PLOT_H/2+16} fontSize={9} fill="#7a849e" opacity={0.7} fontFamily="IBM Plex Mono,monospace">LOW FEASIBILITY / HIGH DESIRABILITY</text>
+        {q(PAD,PAD,toX(XMID)-PAD,toY(YMID)-PAD,"#37c98b12")}
+        {q(toX(XMID),PAD,PAD+PLOT_W-toX(XMID),toY(YMID)-PAD,"#FE571610")}
+        {q(toX(XMID),toY(YMID),PAD+PLOT_W-toX(XMID),PAD+PLOT_H-toY(YMID),"#e0303010")}
+        <text x={PAD+8} y={PAD+16} fontSize={9} fill="#37c98b" fontFamily="IBM Plex Mono,monospace" fontWeight="700">★ DO FIRST — high value, low cost</text>
+        <text x={toX(XMID)+8} y={PAD+16} fontSize={9} fill="#FE5716" opacity={0.8} fontFamily="IBM Plex Mono,monospace">BIG BETS — high value, high cost</text>
+        <text x={PAD+8} y={PAD+PLOT_H-8} fontSize={9} fill="#7a849e" opacity={0.7} fontFamily="IBM Plex Mono,monospace">QUICK MAYBES</text>
+        <text x={toX(XMID)+8} y={PAD+PLOT_H-8} fontSize={9} fill="#e03030" opacity={0.6} fontFamily="IBM Plex Mono,monospace">AVOID</text>
         <rect x={PAD} y={PAD} width={PLOT_W} height={PLOT_H} fill="none" stroke={C.border} strokeWidth={1.5}/>
-        <line x1={PAD+PLOT_W/2} y1={PAD} x2={PAD+PLOT_W/2} y2={PAD+PLOT_H} stroke={C.border} strokeWidth={1} strokeDasharray="4 4"/>
-        <line x1={PAD} y1={PAD+PLOT_H/2} x2={PAD+PLOT_W} y2={PAD+PLOT_H/2} stroke={C.border} strokeWidth={1} strokeDasharray="4 4"/>
-        {[0,2,4,6,8,10].map(v=><g key={v}>
-          <text x={toX(v)} y={PAD+PLOT_H+16} textAnchor="middle" fontSize={10} fill={C.muted} fontFamily="IBM Plex Mono,monospace">{v}</text>
-          <text x={PAD-10} y={toY(v)+4} textAnchor="end" fontSize={10} fill={C.muted} fontFamily="IBM Plex Mono,monospace">{v}</text>
-        </g>)}
-        <text x={PAD+PLOT_W/2} y={H-4} textAnchor="middle" fontSize={11} fill={C.text} fontWeight="600" fontFamily="Sora,sans-serif">Desirability →</text>
-        <text x={12} y={PAD+PLOT_H/2} textAnchor="middle" fontSize={11} fill={C.text} fontWeight="600" fontFamily="Sora,sans-serif" transform={`rotate(-90,12,${PAD+PLOT_H/2})`}>Feasibility →</text>
-        {nodes.map(({entry,des,feas,via,cx,cy,r,words,color})=>{
+        <line x1={toX(XMID)} y1={PAD} x2={toX(XMID)} y2={PAD+PLOT_H} stroke={C.border} strokeWidth={1} strokeDasharray="4 4"/>
+        <line x1={PAD} y1={toY(YMID)} x2={PAD+PLOT_W} y2={toY(YMID)} stroke={C.border} strokeWidth={1} strokeDasharray="4 4"/>
+        {[2,4,6,10,12,18].map(v=><text key={"x"+v} x={toX(v)} y={PAD+PLOT_H+16} textAnchor="middle" fontSize={10} fill={C.muted} fontFamily="IBM Plex Mono,monospace">{v}</text>)}
+        {[[1,"Low"],[3,"Med"],[9,"High"]].map(([v,l])=><text key={"y"+v} x={PAD-10} y={toY(v)+4} textAnchor="end" fontSize={10} fill={C.muted} fontFamily="IBM Plex Mono,monospace">{l}</text>)}
+        <text x={PAD+PLOT_W/2} y={H-4} textAnchor="middle" fontSize={11} fill={C.text} fontWeight="600" fontFamily="Sora,sans-serif">Total Cost of Ownership →</text>
+        <text x={12} y={PAD+PLOT_H/2} textAnchor="middle" fontSize={11} fill={C.text} fontWeight="600" fontFamily="Sora,sans-serif" transform={`rotate(-90,12,${PAD+PLOT_H/2})`}>Desirability →</text>
+        {nodes.map(({entry,des,feas,via,tcoV,wd,cx,cy,words,color})=>{
           const isHovered=tooltip?.id===entry.id;
-          return <g key={entry.id} style={{cursor:"pointer"}} onClick={()=>onView(entry)} onMouseEnter={()=>setTooltip({id:entry.id,cx,cy,r,label:entry.summary||entry.idea,des,feas,via})} onMouseLeave={()=>setTooltip(null)}>
-            <circle cx={cx} cy={cy} r={r} fill={color} fillOpacity={isHovered?0.9:0.18} stroke={color} strokeWidth={isHovered?2.5:1.5} style={{transition:"all 0.2s"}}/>
-            {words.map((word,wi)=><text key={wi} x={cx} y={cy+(wi-(words.length-1)/2)*11} textAnchor="middle" dominantBaseline="middle" fontSize={9} fontWeight="600" fill={color} fontFamily="Sora,sans-serif" style={{pointerEvents:"none"}}>{word}</text>)}
+          return <g key={entry.id} style={{cursor:"pointer"}} onClick={()=>onView(entry)} onMouseEnter={()=>setTooltip({id:entry.id,cx,cy,label:entry.summary||entry.idea,wd,tcoV})} onMouseLeave={()=>setTooltip(null)}>
+            <circle cx={cx} cy={cy} r={11} fill={color} fillOpacity={isHovered?0.9:0.22} stroke={color} strokeWidth={isHovered?2.5:1.5} style={{transition:"all 0.2s"}}/>
+            {words.map((word,wi)=><text key={wi} x={cx} y={cy+18+(wi)*10} textAnchor="middle" dominantBaseline="middle" fontSize={9} fontWeight="600" fill={color} fontFamily="Sora,sans-serif" style={{pointerEvents:"none"}}>{word}</text>)}
           </g>;
         })}
         {tooltip&&(()=>{
-          const TW=180,TH=72;let tx=tooltip.cx+tooltip.r+8,ty=tooltip.cy-TH/2;
-          if (tx+TW>W) tx=tooltip.cx-tooltip.r-TW-8;
+          const TW=180,TH=60;let tx=tooltip.cx+16,ty=tooltip.cy-TH/2;
+          if (tx+TW>W) tx=tooltip.cx-TW-16;
           if (ty<PAD) ty=PAD;if (ty+TH>H-8) ty=H-TH-8;
           return <g style={{pointerEvents:"none"}}>
             <rect x={tx} y={ty} width={TW} height={TH} rx={6} fill="#ffffff" stroke={C.border} strokeWidth={1}/>
             <foreignObject x={tx+10} y={ty+8} width={TW-20} height={TH-16}>
               <div xmlns="http://www.w3.org/1999/xhtml" style={{fontSize:11,color:"#0f1623",lineHeight:1.4,fontFamily:"Sora,sans-serif"}}>
                 <div style={{fontWeight:700,marginBottom:4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{tooltip.label?.slice(0,40)}{tooltip.label?.length>40?"…":""}</div>
-                <div style={{color:"#7a849e",fontSize:10}}>D: {tooltip.des} · F: {tooltip.feas} · V: {tooltip.via}</div>
+                <div style={{color:"#7a849e",fontSize:10}}>W-DVF: {tooltip.wd==null?"—":tooltip.wd.toFixed(2)} · TCO: {tooltip.tcoV??"—"}</div>
               </div>
             </foreignObject>
           </g>;
@@ -251,16 +258,16 @@ const shortDate=new Intl.DateTimeFormat("en-GB",{day:"numeric",month:"short",yea
 const longDate=new Intl.DateTimeFormat("en-GB",{weekday:"long",day:"numeric",month:"long",year:"numeric"});
 
 function LibraryCard({entry,onView}) {
-  const avg=entry.results?Math.round(((entry.results.desirability?.score??0)+(entry.results.feasibility?.score??0)+(entry.results.viability?.score??0))/3):null;
-  const verdict=avg>=8?{label:"Strong",color:C.des}:avg>=6?{label:"Promising",color:C.gold}:avg>=4?{label:"Needs work",color:C.via}:{label:"Reconsider",color:C.danger};
+  const wd=entry.results?weightedDVF(entry.results.desirability?.score,entry.results.viability?.score,entry.results.feasibility?.score):null;
+  const verdict=tier(wd);
   return <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:"14px 18px",marginBottom:10,display:"flex",alignItems:"center",gap:14}}>
     <div style={{flex:1,minWidth:0}}>
       <div style={{fontSize:13,fontWeight:600,color:C.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{entry.summary||entry.idea?.slice(0,80)+"…"}</div>
       <div style={{fontSize:11,color:C.muted,marginTop:3}}>{shortDate.format(new Date(entry.savedAt))}</div>
     </div>
-    {avg!==null&&<div style={{display:"flex",gap:8,alignItems:"center",flexShrink:0}}>
+    {wd!=null&&<div style={{display:"flex",gap:8,alignItems:"center",flexShrink:0}}>
       <Chip label={verdict.label} color={verdict.color}/>
-      <div style={{fontSize:15,fontWeight:700,color:verdict.color,fontFamily:"'IBM Plex Mono',monospace"}}>{avg}/10</div>
+      <div style={{fontSize:15,fontWeight:700,color:verdict.color,fontFamily:"'IBM Plex Mono',monospace"}}>{wd.toFixed(2)}</div>
     </div>}
     <button onClick={()=>onView(entry)} style={{background:C.accent+"22",border:`1px solid ${C.accent}44`,color:C.accent,borderRadius:6,padding:"6px 14px",fontSize:12,cursor:"pointer",fontFamily:"'IBM Plex Mono',monospace",flexShrink:0}}>View →</button>
   </div>;
@@ -287,6 +294,7 @@ export default function App() {
   const [idea,setIdea]=useState("");
   const [questions,setQuestions]=useState([]);
   const [ideaSummary,setIdeaSummary]=useState("");
+  const [ideaTitle,setIdeaTitle]=useState("");
   const [inScope,setInScope]=useState(true);
   const [scopeNote,setScopeNote]=useState("");
   const [answers,setAnswers]=useState({});
@@ -298,6 +306,7 @@ export default function App() {
   const [library,setLibrary]=useState([]);
   const [viewing,setViewing]=useState(null);
   const [ledgerNote,setLedgerNote]=useState("");
+  const [syncMsg,setSyncMsg]=useState("");
 
   useEffect(()=>{
     if (nav==="library") {
@@ -315,7 +324,7 @@ export default function App() {
     } catch(_) {}
   };
 
-  const reset=()=>{ setStage("idea");setIdea("");setQuestions([]);setIdeaSummary("");setAnswers({});setResults({});setAllDone(false);setError("");setInScope(true);setScopeNote("");setViewing(null);setLedgerNote(""); };
+  const reset=()=>{ setStage("idea");setIdea("");setQuestions([]);setIdeaSummary("");setIdeaTitle("");setAnswers({});setResults({});setAllDone(false);setError("");setInScope(true);setScopeNote("");setViewing(null);setLedgerNote(""); };
   const goNew=()=>{ reset();setNav("new"); };
 
   // DFV is R-Spike's intake screen: a fully-scored idea is pushed to the ledger
@@ -327,7 +336,7 @@ export default function App() {
       const res=await fetch("/api/ledger",{
         method:"POST",
         headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({ idea:{ idea:entry.idea, summary:entry.summary, results:entry.results } }),
+        body:JSON.stringify({ idea:{ title:entry.title, idea:entry.idea, summary:entry.summary, results:entry.results } }),
       });
       const d=await res.json().catch(()=>null);
       // Require an explicit { ok:true }. A 200 that isn't our JSON (e.g. the SPA
@@ -341,12 +350,32 @@ export default function App() {
     }
   };
 
+  // Backfill: push every fully-scored library idea to the ledger inbox in one go.
+  // The ledger importer de-dupes by title, so re-syncing is safe.
+  const syncLibrary=async()=>{
+    const items=library.filter(e=>hasAllScores(e.results));
+    if (!items.length) { setSyncMsg("No fully-scored ideas in the library to sync."); return; }
+    setSyncMsg(`Syncing ${items.length}…`);
+    let ok=0,fail=0;
+    for (const e of items) {
+      try {
+        const res=await fetch("/api/ledger",{
+          method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({ idea:{ title:e.title, idea:e.idea, summary:e.summary, results:e.results } }),
+        });
+        const d=await res.json().catch(()=>null);
+        if (res.ok && d && d.ok===true) ok++; else fail++;
+      } catch { fail++; }
+    }
+    setSyncMsg(`Synced ${ok} idea${ok===1?"":"s"} to the ledger inbox${fail?`, ${fail} failed`:""}. Open the R-Spike dashboard to see them.`);
+  };
+
   const submitIdea=async()=>{
     if (!idea.trim()) return;
     setLoading(true);setError("");
     try {
       const r=await callClaude(AGENTS.clarification.system,`UK energy innovation idea: ${idea}`);
-      setQuestions(r.questions||[]);setIdeaSummary(r.summary||"");
+      setQuestions(r.questions||[]);setIdeaSummary(r.summary||"");setIdeaTitle(r.title||"");
       setInScope(r.inScope!==false);setScopeNote(r.scopeNote||"");
       setStage("clarify");
     } catch(e) { setError(e.message); }
@@ -381,7 +410,7 @@ export default function App() {
       setError(`${failed.map(k=>AGENTS[k].label).join(" and ")} did not complete, so nothing was saved to your library. Retry to finish the analysis.`);
       return;
     }
-    const entry={id:Date.now().toString(),idea,summary:ideaSummary,questions,answers,results:final,savedAt:new Date().toISOString()};
+    const entry={id:Date.now().toString(),idea,title:ideaTitle,summary:ideaSummary,questions,answers,results:final,savedAt:new Date().toISOString()};
     saveIdea(entry);
     sendToLedger(entry);
   };
@@ -481,13 +510,17 @@ export default function App() {
         </div>}
 
         {nav==="library"&&!viewing&&<div>
-          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:28}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
             <div>
               <h1 style={{fontSize:28,fontWeight:700,color:C.text,marginBottom:4}}>Idea Library</h1>
               <p style={{fontSize:13,color:C.muted}}>All previously analysed UK energy ideas, saved in this browser.</p>
             </div>
-            <button style={btn} onClick={goNew}>+ New Idea</button>
+            <div style={{display:"flex",gap:10}}>
+              <button style={btnG} onClick={syncLibrary}>⇪ Sync to ledger</button>
+              <button style={btn} onClick={goNew}>+ New Idea</button>
+            </div>
           </div>
+          {syncMsg&&<div style={{fontSize:12,color:C.muted,marginBottom:16,fontFamily:"'IBM Plex Mono',monospace"}}>{syncMsg}</div>}
           {library.length>0&&<IdeaMatrix library={library} onView={e=>setViewing(e)}/>}
           {library.length===0&&<div style={{...card,textAlign:"center",padding:48}}>
             <div style={{fontSize:30,marginBottom:12}}>💡</div>
