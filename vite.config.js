@@ -24,7 +24,7 @@ function apiDevServer(env) {
     name: "api-dev-server",
     configureServer(server) {
       mount(server, "/api/claude", "/api/claude.js", ["ANTHROPIC_API_KEY"]);
-      mount(server, "/api/ledger", "/api/ledger.js", ["LEDGER_INBOX", "DFV_USER_ID", "ALLOWED_ORIGIN"]);
+      mount(server, "/api/ledger", "/api/ledger.js", ["LEDGER_INBOX", "DFV_USER_ID"]);
     },
   };
 }

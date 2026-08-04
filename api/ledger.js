@@ -28,7 +28,9 @@ function originAllowed(req) {
   const origin = req.headers.origin;
   if (!origin) return true;
   try {
-    const { host } = new URL(origin);
+    const { host, hostname } = new URL(origin);
+    // Always allow local development (loopback), regardless of ALLOWED_ORIGIN.
+    if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") return true;
     const allowed = process.env.ALLOWED_ORIGIN;
     if (allowed) return origin === allowed;
     return host === req.headers.host;

@@ -329,7 +329,12 @@ export default function App() {
         headers:{"Content-Type":"application/json"},
         body:JSON.stringify({ idea:{ idea:entry.idea, summary:entry.summary, results:entry.results } }),
       });
-      if (!res.ok) { const d=await res.json().catch(()=>null); throw new Error(d?.error?.message||`Request failed (${res.status})`); }
+      const d=await res.json().catch(()=>null);
+      // Require an explicit { ok:true }. A 200 that isn't our JSON (e.g. the SPA
+      // fallback when the /api/ledger route isn't mounted) must NOT look like success.
+      if (!res.ok || !d || d.ok !== true) {
+        throw new Error(d?.error?.message || `ledger endpoint not reachable (status ${res.status}) — is the dev server running this branch?`);
+      }
       setLedgerNote("✓ Added to the R-Spike ledger inbox.");
     } catch(e) {
       setLedgerNote(`Saved locally, but couldn't reach the ledger inbox (${e.message}). It'll need re-sending, or check the dev server is running.`);
